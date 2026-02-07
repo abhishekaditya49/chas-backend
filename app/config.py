@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     membership_cache_ttl_seconds: int = 20
     user_cache_ttl_seconds: int = 30
     data_cache_max_entries: int = 5000
+    enforce_invite_whitelist: bool = True
+    whitelist_cache_ttl_seconds: int = 300
 
     @property
     def is_production(self) -> bool:
@@ -49,7 +51,11 @@ class Settings(BaseSettings):
         """Parse comma-separated ALLOWED_ORIGINS into a list."""
         return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "extra": "ignore",
+    }
 
 
 settings = Settings()  # type: ignore[call-arg]

@@ -55,6 +55,8 @@ SLOW_QUERY_LOG_THRESHOLD_MS=0
 MEMBERSHIP_CACHE_TTL_SECONDS=20
 USER_CACHE_TTL_SECONDS=30
 DATA_CACHE_MAX_ENTRIES=5000
+ENFORCE_INVITE_WHITELIST=true
+WHITELIST_CACHE_TTL_SECONDS=300
 ```
 
 ## Local Development
@@ -83,7 +85,7 @@ ruff check .
 
 ## API Overview
 
-- Auth: `/auth/*`
+- Auth: `/auth/*` (session, access status, invite redemption)
 - Communities: `/communities/*`
 - Chamber: `/communities/{community_id}/chamber/*`
 - Gazette: `/communities/{community_id}/gazette/*`
@@ -105,6 +107,7 @@ Authorization: Bearer <supabase_jwt>
 
 - Frontend authenticates directly with Supabase Auth.
 - Backend validates bearer JWT using `supabase.auth.get_user(token)`.
+- Backend enforces invite-whitelist access before protected routes.
 - Backend performs business logic writes with the service-role key.
 - Frontend receives realtime updates directly from Supabase Realtime.
 
@@ -132,7 +135,7 @@ docker run -p 8000:8000 --env-file .env chas-backend
 
 - Set `ENVIRONMENT=production`
 - Restrict `ALLOWED_ORIGINS`
-- Apply Supabase migration in `supabase/migrations/001_initial_schema.sql`
+- Apply Supabase migrations in `supabase/migrations/*.sql`
 - Enable Realtime replication for required tables
 - Configure Google OAuth provider in Supabase
 - Run one scheduler instance only

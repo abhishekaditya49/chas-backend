@@ -41,6 +41,17 @@ class ForbiddenError(AppError):
         super().__init__(message=reason, code="FORBIDDEN", status_code=403)
 
 
+class InviteRequiredError(AppError):
+    """Raised when an authenticated user has not redeemed an invite yet."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            message="Invite code redemption required before accessing CHAS",
+            code="INVITE_REQUIRED",
+            status_code=403,
+        )
+
+
 class ConflictError(AppError):
     """Raised on duplicate/conflicting operations."""
 

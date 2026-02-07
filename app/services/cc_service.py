@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.services.common import SupabaseService
-from app.utils.errors import InsufficientCCError
+from app.utils.errors import InsufficientCCError, InvalidInputError
 from app.utils.time import now_utc
 from supabase import Client
 
@@ -72,36 +72,29 @@ class CCService:
         community_id: str,
         amount: int,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Transfer CC from lender to borrower and track debt on borrower."""
-        lender = self.get_balance(lender_id, community_id)
-        borrower = self.get_balance(borrower_id, community_id)
+        """Transfer CC from lender to borrower atomically and track borrower debt."""
+        try:
+            self.db.execute(
+                self.db.client.rpc(
+                    "transfer_cc_for_borrow",
+                    {
+                        "p_lender_id": lender_id,
+                        "p_borrower_id": borrower_id,
+                        "p_community_id": community_id,
+                        "p_amount": amount,
+                    },
+                ),
+                default=None,
+            )
+        except InvalidInputError as exc:
+            message = str(getattr(exc, "message", "")).upper()
+            if "INSUFFICIENT_CC" in message:
+                lender = self.get_balance(lender_id, community_id)
+                raise InsufficientCCError(required=amount, available=int(lender["remaining"])) from exc
+            raise
 
-        lender_remaining = int(lender["remaining"])
-        if lender_remaining < amount:
-            raise InsufficientCCError(required=amount, available=lender_remaining)
-
-        lender_payload = {
-            "remaining": lender_remaining - amount,
-            "spent_today": int(lender["spent_today"]) + amount,
-        }
-        borrower_payload = {
-            "remaining": int(borrower["remaining"]) + amount,
-            "debt": int(borrower.get("debt", 0)) + amount,
-        }
-
-        lender_rows = self.db.update(
-            "cc_balances",
-            {"user_id": lender_id, "community_id": community_id},
-            lender_payload,
-        )
-        borrower_rows = self.db.update(
-            "cc_balances",
-            {"user_id": borrower_id, "community_id": community_id},
-            borrower_payload,
-        )
-        return (
-            lender_rows[0] if lender_rows else self.get_balance(lender_id, community_id),
-            borrower_rows[0] if borrower_rows else self.get_balance(borrower_id, community_id),
+        return self.get_balance(lender_id, community_id), self.get_balance(
+            borrower_id, community_id
         )
 
     def refund_tip_to_tip(self, user_id: str, community_id: str, amount: int) -> dict[str, Any]:

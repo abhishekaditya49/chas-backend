@@ -38,6 +38,19 @@ class BorrowService:
         self.db.ensure_community_member(borrower_id, community_id)
         self.db.ensure_community_member(lender_id, community_id)
 
+        existing_pending = self.db.select_many(
+            "borrow_requests",
+            filters={
+                "borrower_id": borrower_id,
+                "lender_id": lender_id,
+                "community_id": community_id,
+                "status": "pending",
+            },
+            limit=1,
+        )
+        if existing_pending:
+            raise ConflictError("A pending borrow request already exists")
+
         request = self.db.insert_one(
             "borrow_requests",
             {
@@ -91,17 +104,35 @@ class BorrowService:
         amount = int(request["amount"])
 
         if action == "approved":
-            lender_balance, _ = self.cc.transfer(
-                lender_id=str(request["lender_id"]),
-                borrower_id=str(request["borrower_id"]),
-                community_id=community_id,
-                amount=amount,
-            )
-            updated = self.db.update(
+            claimed_rows = self.db.update(
                 "borrow_requests",
-                {"id": request_id},
+                {
+                    "id": request_id,
+                    "community_id": community_id,
+                    "lender_id": actor_id,
+                    "status": "pending",
+                },
                 {"status": "approved"},
-            )[0]
+            )
+            if not claimed_rows:
+                raise ConflictError("Borrow request already resolved")
+
+            try:
+                lender_balance, _ = self.cc.transfer(
+                    lender_id=str(request["lender_id"]),
+                    borrower_id=str(request["borrower_id"]),
+                    community_id=community_id,
+                    amount=amount,
+                )
+            except Exception:
+                self.db.update(
+                    "borrow_requests",
+                    {"id": request_id, "status": "approved"},
+                    {"status": "pending"},
+                )
+                raise
+
+            updated = claimed_rows[0]
             self.ledger.create_entry(
                 user_id=str(request["lender_id"]),
                 community_id=community_id,
@@ -132,11 +163,19 @@ class BorrowService:
             return updated, message, lender_balance
 
         if action == "declined":
-            updated = self.db.update(
+            updated_rows = self.db.update(
                 "borrow_requests",
-                {"id": request_id},
+                {
+                    "id": request_id,
+                    "community_id": community_id,
+                    "lender_id": actor_id,
+                    "status": "pending",
+                },
                 {"status": "declined"},
-            )[0]
+            )
+            if not updated_rows:
+                raise ConflictError("Borrow request already resolved")
+            updated = updated_rows[0]
             self.notifications.create_notification(
                 user_id=str(request["borrower_id"]),
                 community_id=community_id,

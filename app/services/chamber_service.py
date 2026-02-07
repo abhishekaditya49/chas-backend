@@ -10,6 +10,7 @@ from app.services.common import SupabaseService
 from app.services.declaration_service import DeclarationService
 from app.services.ledger_service import LedgerService
 from app.services.tip_to_tip_service import TipToTipService
+from app.utils.errors import InvalidInputError
 from supabase import Client
 
 
@@ -32,8 +33,7 @@ class ChamberService:
         if not messages:
             return []
 
-        user_ids = [str(message["user_id"]) for message in messages]
-        user_map = self.db.get_users_map(user_ids)
+        message_user_ids = {str(message["user_id"]) for message in messages}
 
         declaration_ids = [
             str(message["reference_id"])
@@ -87,6 +87,31 @@ class ChamberService:
             else {}
         )
 
+        votes_by_id: dict[str, list[dict[str, Any]]] = {}
+        if tip_map:
+            votes = self.db.execute(
+                self.db.client.table("tip_to_tip_votes")
+                .select("*")
+                .in_("proposal_id", list(tip_map.keys())),
+                default=[],
+            )
+            for vote in votes:
+                proposal_id = str(vote["proposal_id"])
+                votes_by_id.setdefault(proposal_id, []).append(vote)
+
+        related_user_ids = set(message_user_ids)
+        related_user_ids.update(str(item["user_id"]) for item in declaration_map.values())
+        for borrow in borrow_map.values():
+            related_user_ids.add(str(borrow["borrower_id"]))
+            related_user_ids.add(str(borrow["lender_id"]))
+        for proposal in tip_map.values():
+            related_user_ids.add(str(proposal["proposer_id"]))
+        for votes in votes_by_id.values():
+            for vote in votes:
+                related_user_ids.add(str(vote["user_id"]))
+
+        user_map = self.db.get_users_map(related_user_ids)
+
         if declaration_map:
             decl_witnesses = self.db.execute(
                 self.db.client.table("witnesses")
@@ -102,31 +127,31 @@ class ChamberService:
                 if str(row["user_id"]) == current_user_id:
                     witnessed_by_user.add(declaration_id)
 
-            declaration_users = self.db.get_users_map(
-                [str(item["user_id"]) for item in declaration_map.values()]
-            )
             for declaration in declaration_map.values():
                 declaration_id = str(declaration["id"])
                 declaration["witnessed_count"] = counts.get(declaration_id, 0)
                 declaration["has_witnessed"] = declaration_id in witnessed_by_user
-                declaration["user"] = declaration_users.get(str(declaration["user_id"]))
+                declaration["user"] = user_map.get(str(declaration["user_id"]))
+
+        if borrow_map:
+            for borrow in borrow_map.values():
+                borrow["borrower"] = user_map.get(str(borrow["borrower_id"]))
+                borrow["lender"] = user_map.get(str(borrow["lender_id"]))
 
         if tip_map:
-            votes = self.db.execute(
-                self.db.client.table("tip_to_tip_votes")
-                .select("*")
-                .in_("proposal_id", list(tip_map.keys())),
-                default=[],
-            )
-            votes_by_id: dict[str, list[dict[str, Any]]] = {}
-            for vote in votes:
-                proposal_id = str(vote["proposal_id"])
-                votes_by_id.setdefault(proposal_id, []).append(vote)
             for proposal_id, proposal in tip_map.items():
-                proposal["votes"] = sorted(
+                sorted_votes = sorted(
                     votes_by_id.get(proposal_id, []),
                     key=lambda row: str(row.get("created_at", "")),
                 )
+                proposal["proposer"] = user_map.get(str(proposal["proposer_id"]))
+                proposal["votes"] = [
+                    {
+                        **vote,
+                        "user": user_map.get(str(vote["user_id"])),
+                    }
+                    for vote in sorted_votes
+                ]
 
         payload: list[dict[str, Any]] = []
         for message in messages:
@@ -147,9 +172,12 @@ class ChamberService:
         community_id: str,
         limit: int = 50,
         before_message_id: str | None = None,
+        after_message_id: str | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
         """Return paginated chamber messages enriched with nested objects."""
         self.db.ensure_community_member(user_id, community_id)
+        if before_message_id and after_message_id:
+            raise InvalidInputError("Use either before or after, not both")
 
         query = (
             self.db.client.table("chat_messages")
@@ -164,6 +192,13 @@ class ChamberService:
                 not_found_label="Message",
             )
             query = query.lt("created_at", anchor["created_at"])
+        if after_message_id:
+            anchor = self.db.select_one(
+                "chat_messages",
+                {"id": after_message_id, "community_id": community_id},
+                not_found_label="Message",
+            )
+            query = query.gt("created_at", anchor["created_at"])
 
         rows = self.db.execute(query.limit(limit + 1), default=[])
         has_more = len(rows) > limit

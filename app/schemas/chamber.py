@@ -18,7 +18,7 @@ class DeclarationCreate(BaseModel):
 
     title: str = Field(..., min_length=1)
     description: str = ""
-    cc_spent: int = Field(..., ge=1, le=20)
+    cc_spent: int = Field(..., ge=1)
 
 
 class DeclarationResponse(BaseModel):
@@ -69,7 +69,7 @@ class TipToTipCreate(BaseModel):
 
     title: str = Field(..., min_length=1)
     description: str = ""
-    stake_amount: int = Field(..., ge=50)
+    stake_amount: int = Field(..., ge=1)
 
 
 class TipToTipVoteRequest(BaseModel):

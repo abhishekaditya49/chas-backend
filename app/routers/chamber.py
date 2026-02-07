@@ -26,6 +26,7 @@ def list_messages(
     community_id: str,
     limit: int = Query(default=50, ge=1, le=200),
     before: str | None = Query(default=None),
+    after: str | None = Query(default=None),
     user: Any = Depends(get_current_user),
     client: Client = Depends(get_db_client),
 ) -> dict:
@@ -36,6 +37,7 @@ def list_messages(
         community_id=community_id,
         limit=limit,
         before_message_id=before,
+        after_message_id=after,
     )
     return {"messages": messages, "has_more": has_more}
 

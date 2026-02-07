@@ -11,9 +11,11 @@ from app.services.cc_service import CCService
 from app.services.common import SupabaseService
 from app.services.ledger_service import LedgerService
 from app.services.notification_service import NotificationService
-from app.utils.errors import ConflictError, InvalidInputError, NotFoundError
+from app.utils.errors import ConflictError, InsufficientCCError, InvalidInputError, NotFoundError
 from app.utils.time import now_utc
 from supabase import Client
+
+TIP_TO_TIP_DEADLINE_HOURS = 4
 
 
 class TipToTipService:
@@ -54,10 +56,30 @@ class TipToTipService:
         stake_amount: int,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Create a new active proposal and auto-cast proposer's accept vote."""
-        if stake_amount < 50:
-            raise InvalidInputError("Tip-to-tip stake must be at least 50 CC")
+        if stake_amount < 1:
+            raise InvalidInputError("Tip-to-tip stake must be at least 1 CC")
 
         self.db.ensure_community_member(proposer_id, community_id)
+        existing_active = self.db.select_many(
+            "tip_to_tip_proposals",
+            filters={
+                "community_id": community_id,
+                "proposer_id": proposer_id,
+                "status": "active",
+            },
+            limit=1,
+        )
+        if existing_active:
+            raise ConflictError(
+                "You already have an active tip-to-tip proposal",
+                code="ACTIVE_TIP_TO_TIP_EXISTS",
+            )
+
+        balance_before = self.cc.get_balance(proposer_id, community_id)
+        remaining = int(balance_before["remaining"])
+        if stake_amount > remaining:
+            raise InsufficientCCError(required=stake_amount, available=remaining)
+
         balance = self.cc.spend_cc(proposer_id, community_id, stake_amount)
 
         proposal = self.db.insert_one(
@@ -68,7 +90,9 @@ class TipToTipService:
                 "title": title,
                 "description": description,
                 "stake_amount": stake_amount,
-                "deadline": (now_utc() + timedelta(hours=24)).isoformat(),
+                "deadline": (
+                    now_utc() + timedelta(hours=TIP_TO_TIP_DEADLINE_HOURS)
+                ).isoformat(),
                 "status": "active",
             },
         )
@@ -114,7 +138,7 @@ class TipToTipService:
         voter_id: str,
         vote: str,
     ) -> tuple[dict[str, Any], bool, str | None]:
-        """Cast a vote and resolve the proposal when all members have voted."""
+        """Cast a vote and resolve on decline or unanimous acceptance."""
         proposal = self.get_proposal(proposal_id, community_id=community_id)
         if proposal["status"] != "active":
             raise ConflictError("Proposal is not active", code="PROPOSAL_EXPIRED")
@@ -148,20 +172,56 @@ class TipToTipService:
         updated = self.get_proposal(proposal_id, community_id=community_id)
         return updated, resolved, outcome
 
+    def _ensure_stake_charged(
+        self,
+        proposal: dict[str, Any],
+        community_id: str,
+        reason: str,
+    ) -> None:
+        """Ensure proposer has been charged for this proposal stake exactly once."""
+        proposal_id = str(proposal["id"])
+        proposer_id = str(proposal["proposer_id"])
+        stake_amount = int(proposal["stake_amount"])
+        ledger_rows = self.db.select_many(
+            "ledger_entries",
+            filters={
+                "user_id": proposer_id,
+                "community_id": community_id,
+                "type": "tip_to_tip",
+                "reference_id": proposal_id,
+            },
+        )
+        if any(int(row["amount"]) < 0 for row in ledger_rows):
+            return
+
+        self.cc.spend_cc(proposer_id, community_id, stake_amount)
+        self.ledger.create_entry(
+            user_id=proposer_id,
+            community_id=community_id,
+            entry_type="tip_to_tip",
+            amount=-stake_amount,
+            description=f"Tip-to-Tip '{proposal['title']}' {reason} - stake charged",
+            reference_id=proposal_id,
+        )
+
     def _resolve_if_complete(self, proposal_id: str, community_id: str) -> tuple[bool, str | None]:
-        """Check if all members voted, then resolve proposal outcome."""
+        """Resolve proposal outcome based on votes cast so far."""
         proposal = self.get_proposal(proposal_id, community_id=community_id)
         votes = proposal["votes"]
         members = self.db.select_many("community_members", filters={"community_id": community_id})
         total_members = len({str(row["user_id"]) for row in members})
 
-        if len(votes) < total_members:
-            return False, None
-
+        # Any decline immediately rejects the proposal.
         declined = any(str(vote_row["vote"]) == "decline" for vote_row in votes)
         if declined:
+            # The schema has no dedicated "rejected" status, so we persist as expired
+            # and return an explicit API outcome for the UI.
+            self._ensure_stake_charged(proposal, community_id=community_id, reason="rejected")
             self.db.update("tip_to_tip_proposals", {"id": proposal_id}, {"status": "expired"})
-            return True, "expired"
+            return True, "rejected"
+
+        if len(votes) < total_members:
+            return False, None
 
         self.db.update("tip_to_tip_proposals", {"id": proposal_id}, {"status": "completed"})
         self.cc.refund_tip_to_tip(
@@ -193,6 +253,11 @@ class TipToTipService:
         )
         expired_rows: list[dict[str, Any]] = []
         for proposal in overdue:
+            self._ensure_stake_charged(
+                proposal,
+                community_id=str(proposal["community_id"]),
+                reason="expired",
+            )
             updated = self.db.update(
                 "tip_to_tip_proposals",
                 {"id": proposal["id"]},

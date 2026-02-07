@@ -1,0 +1,47 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    expose:
+      - "8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - chas-net
+
+  gateway:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    command: caddy reverse-proxy --from ${API_DOMAIN} --to api:8000
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - chas-net
+
+networks:
+  chas-net:
+
+volumes:
+  caddy_data:
+  caddy_config:
